@@ -1,0 +1,79 @@
+# ================================
+# CFAP - Git Ignore
+# ================================
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# IDE / Editors
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Uploaded datasets
+uploads/
+data/raw/
+data/processed/
+
+# Generated analysis outputs
+results/
+artifacts/
+
+# Generated reports
+generated_reports/
+
+# Temporary files
+tmp/
+temp/
+
+# Database local files
+*.sqlite
+*.sqlite3
+
+# Secrets / certificates
+*.pem
+*.key
+*.crt
