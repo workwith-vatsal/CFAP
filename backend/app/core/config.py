@@ -61,10 +61,10 @@ class Settings(BaseSettings):
     min_benchmark_sample_size: int = 5
     audit_log_retention_days: int = 90
 
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = "redis://127.0.0.1:6380/0"
 
-    celery_broker_url: str = "redis://localhost:6379/0"
-    celery_result_backend: str = "redis://localhost:6379/0"
+    celery_broker_url: str = "redis://127.0.0.1:6380/0"
+    celery_result_backend: str = "redis://127.0.0.1:6380/0"
 
     model_config = SettingsConfigDict(
         env_file=".env",

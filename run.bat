@@ -4,17 +4,23 @@ setlocal EnableDelayedExpansion
 title CFAP Launcher
 
 REM ============================================================================
-REM 1. RESOLVE PROJECT ROOT
+REM 1. RESOLVE PROJECT ROOT & SET PROCESS ENVIRONMENT
 REM ============================================================================
 set "PROJECT_ROOT=%~dp0"
 if "%PROJECT_ROOT:~-1%"=="\" set "PROJECT_ROOT=%PROJECT_ROOT:~0,-1%"
 cd /d "%PROJECT_ROOT%"
+
+REM Enforce consistent Redis and Celery endpoints (overriding any stale .env values)
+set "REDIS_URL=redis://127.0.0.1:6380/0"
+set "CELERY_BROKER_URL=redis://127.0.0.1:6380/0"
+set "CELERY_RESULT_BACKEND=redis://127.0.0.1:6380/0"
 
 echo ============================================================
 echo                    CFAP STARTUP LAUNCHER
 echo        Cognitive Feedback Analytics Platform
 echo ============================================================
 echo [*] Project Root: "%PROJECT_ROOT%"
+echo [*] Redis Endpoint: 127.0.0.1:6380
 echo.
 
 REM ============================================================================
@@ -107,22 +113,23 @@ set "BACKEND_STATUS=NOT CHECKED"
 set "CELERY_STATUS=NOT CHECKED"
 set "FRONTEND_STATUS=NOT CHECKED"
 set "FRONTEND_CONFIRMED=0"
+set "REDIS_WIN_OK=0"
 
 REM ============================================================================
-REM 3. POSTGRESQL SERVICE (postgresql-x64-17)
+REM 3. POSTGRESQL SERVICE (postgresql-x64-17) & DATABASE CONNECTIVITY
 REM ============================================================================
 echo [*] Checking PostgreSQL Windows service [postgresql-x64-17]...
 sc query postgresql-x64-17 2>nul | findstr /i "STATE" | findstr /i "RUNNING" >nul 2>&1
 if not errorlevel 1 (
-    set "POSTGRES_STATUS=ALREADY RUNNING"
-    echo [OK] PostgreSQL service [postgresql-x64-17] is already running.
+    set "POSTGRES_STATUS=RUNNING"
+    echo [OK] PostgreSQL service [postgresql-x64-17] is running.
 ) else (
     echo [*] PostgreSQL service is stopped. Attempting to start...
     net start postgresql-x64-17 >nul 2>&1
     ping -n 3 127.0.0.1 >nul
     sc query postgresql-x64-17 2>nul | findstr /i "STATE" | findstr /i "RUNNING" >nul 2>&1
     if not errorlevel 1 (
-        set "POSTGRES_STATUS=READY (Started)"
+        set "POSTGRES_STATUS=STARTED"
         echo [OK] PostgreSQL service started successfully.
     ) else (
         set "POSTGRES_STATUS=FAILED"
@@ -132,89 +139,62 @@ if not errorlevel 1 (
         echo           net start postgresql-x64-17
     )
 )
-echo.
 
-REM ============================================================================
-REM 4. REDIS IN WSL 2 (Ubuntu)
-REM ============================================================================
-echo [*] Checking Redis inside Ubuntu WSL...
-set "WSL_PONG=0"
-wsl -d Ubuntu -- redis-cli ping > "%TEMP%\cfap_redis_ping.txt" 2>nul
-if exist "%TEMP%\cfap_redis_ping.txt" (
-    set /p REDIS_OUT=<"%TEMP%\cfap_redis_ping.txt"
-    del "%TEMP%\cfap_redis_ping.txt" >nul 2>&1
-    if /i "!REDIS_OUT!"=="PONG" set "WSL_PONG=1"
-)
-
-if "!WSL_PONG!"=="1" (
-    set "REDIS_WSL_STATUS=ALREADY RUNNING"
-    echo [OK] Redis responded with PONG inside Ubuntu WSL.
-) else (
-    echo [*] Redis is not responding in Ubuntu WSL. Attempting safe start...
-    wsl -d Ubuntu -u root -- service redis-server start >nul 2>&1
-    ping -n 3 127.0.0.1 >nul
-    wsl -d Ubuntu -- redis-cli ping > "%TEMP%\cfap_redis_ping.txt" 2>nul
-    if exist "%TEMP%\cfap_redis_ping.txt" (
-        set /p REDIS_OUT=<"%TEMP%\cfap_redis_ping.txt"
-        del "%TEMP%\cfap_redis_ping.txt" >nul 2>&1
-        if /i "!REDIS_OUT!"=="PONG" set "WSL_PONG=1"
-    )
-    if "!WSL_PONG!"=="1" (
-        set "REDIS_WSL_STATUS=READY (Started)"
-        echo [OK] Redis started and responded with PONG inside Ubuntu WSL.
+REM Verify database query execution from Python
+if not "!POSTGRES_STATUS!"=="FAILED" (
+    "!PYTHON_EXE!" -c "import sys; from backend.app.db.database import engine; from sqlalchemy import text; sys.exit(0 if engine.connect().execute(text('SELECT 1')).scalar() == 1 else 1)" >nul 2>&1
+    if not errorlevel 1 (
+        set "POSTGRES_STATUS=READY (Database Connected)"
+        echo [OK] CFAP database connection verified successfully.
     ) else (
-        set "REDIS_WSL_STATUS=FAILED"
-        echo [ERROR] Redis failed to respond with PONG inside Ubuntu WSL.
-        echo         Manual corrective action:
-        echo           wsl -d Ubuntu -u root -- service redis-server start
+        set "POSTGRES_STATUS=FAILED (Database Query Failed)"
+        echo [ERROR] PostgreSQL service is running but CFAP database query failed.
     )
 )
 echo.
 
 REM ============================================================================
-REM 5. WINDOWS-SIDE REDIS CONNECTIVITY TEST
+REM 4. REDIS IN WSL 2 & WINDOWS-SIDE CONNECTIVITY TEST (Port 6380)
 REM ============================================================================
-echo [*] Testing Windows Python connectivity to Redis [127.0.0.1:6379]...
-if "!WSL_PONG!"=="1" (
-    set "WIN_REDIS_OK=0"
-    for /l %%k in (1,1,5) do (
-        if "!WIN_REDIS_OK!"=="0" (
-            "!PYTHON_EXE!" -c "import sys, redis; sys.exit(0 if redis.Redis(host='127.0.0.1', port=6379, socket_connect_timeout=3).ping() else 1)" >nul 2>&1
+echo [*] Checking Redis connectivity on 127.0.0.1:6380...
+
+REM Check if Redis is already accepting connections from Windows
+"!PYTHON_EXE!" -c "import sys, redis; sys.exit(0 if redis.Redis(host='127.0.0.1', port=6380, socket_connect_timeout=2).ping() else 1)" >nul 2>&1
+if not errorlevel 1 (
+    set "REDIS_WIN_OK=1"
+    set "REDIS_WSL_STATUS=ALREADY RUNNING"
+    set "REDIS_WIN_STATUS=READY (Connected)"
+    echo [OK] Redis is already active and responsive on 127.0.0.1:6380.
+) else (
+    echo [*] Redis on 127.0.0.1:6380 is not active. Initializing WSL Redis session...
+    REM Ensure persistent system service is started and WSL distribution stays active
+    start "CFAP - Redis (WSL)" /min cmd.exe /c "wsl -d Ubuntu -u root -- bash -c 'service redis-server start; exec sleep infinity'"
+    echo [*] Waiting for Redis on 127.0.0.1:6380 [timeout: 15 seconds]...
+    for /l %%k in (1,1,15) do (
+        if "!REDIS_WIN_OK!"=="0" (
+            ping -n 2 127.0.0.1 >nul
+            "!PYTHON_EXE!" -c "import sys, redis; sys.exit(0 if redis.Redis(host='127.0.0.1', port=6380, socket_connect_timeout=2).ping() else 1)" >nul 2>&1
             if not errorlevel 1 (
-                set "WIN_REDIS_OK=1"
-            ) else (
-                ping -n 2 127.0.0.1 >nul
+                set "REDIS_WIN_OK=1"
+                set "REDIS_WSL_STATUS=READY (Started)"
+                set "REDIS_WIN_STATUS=READY (Connected)"
+                echo [OK] Windows Python verified connectivity to Redis at 127.0.0.1:6380.
             )
         )
     )
-    if "!WIN_REDIS_OK!"=="1" (
-        set "REDIS_WIN_STATUS=READY (Connected)"
-        echo [OK] Windows Python verified connectivity to Redis at 127.0.0.1:6379.
-    ) else (
-        set "REDIS_WIN_STATUS=FAILED (Unreachable from Windows)"
-        echo [ERROR] Windows Python cannot connect to Redis at 127.0.0.1:6379.
-        echo         WSL 2 mirrored networking did not bridge the Redis port to Windows localhost.
-        echo.
-        echo         Corrective troubleshooting actions:
-        echo         1. Ensure %%USERPROFILE%%\.wslconfig has:
-        echo            [wsl2]
-        echo            networkingMode=mirrored
-        echo            hostAddressLoopback=true
-        echo         2. Restart WSL by running in terminal:
-        echo            wsl --shutdown
-        echo            wsl -d Ubuntu -u root -- service redis-server start
-        echo         3. Verify Windows Firewall does not block loopback TCP 6379.
-        echo.
-        echo         Celery worker startup will be skipped to prevent unhandled connection retries.
+    if "!REDIS_WIN_OK!"=="0" (
+        set "REDIS_WSL_STATUS=FAILED"
+        set "REDIS_WIN_STATUS=FAILED (Unreachable on 127.0.0.1:6380)"
+        echo [ERROR] Redis on 127.0.0.1:6380 failed to respond within 15 seconds.
+        echo         Corrective action: Check WSL Ubuntu status with:
+        echo           wsl -d Ubuntu -u root -- service redis-server status
+        echo         Celery worker startup will be skipped.
     )
-) else (
-    set "REDIS_WIN_STATUS=SKIPPED (WSL Redis unavailable)"
-    echo [WARNING] Skipped Windows Redis test because WSL Redis is not responding.
 )
 echo.
 
 REM ============================================================================
-REM 6. FASTAPI BACKEND (Uvicorn on 127.0.0.1:8000)
+REM 5. FASTAPI BACKEND (Uvicorn on 127.0.0.1:8000)
 REM ============================================================================
 echo [*] Checking CFAP Backend status [http://127.0.0.1:8000/health]...
 curl.exe -s --connect-timeout 2 http://127.0.0.1:8000/health 2>nul | findstr /i "CFAP Backend" >nul 2>&1
@@ -230,7 +210,7 @@ if not errorlevel 1 (
         echo           FastAPI startup skipped to avoid conflict or terminating unrelated tasks.
     ) else (
         echo [*] Launching FastAPI Backend in a dedicated window...
-        start "CFAP - Backend (FastAPI)" cmd.exe /k "cd /d \"%PROJECT_ROOT%\" && \"%PYTHON_EXE%\" -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000"
+        start "CFAP - Backend (FastAPI)" cmd.exe /k ""!PYTHON_EXE!" -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000"
         echo [*] Waiting for Backend health endpoint [timeout: 45 seconds]...
         set "BACKEND_STATUS=FAILED (Health check timed out)"
         for /l %%i in (1,1,45) do (
@@ -252,10 +232,10 @@ if not errorlevel 1 (
 echo.
 
 REM ============================================================================
-REM 7. CELERY WORKER
+REM 6. CELERY WORKER
 REM ============================================================================
 echo [*] Checking CFAP Celery Worker status...
-if "!REDIS_WIN_STATUS!"=="READY (Connected)" (
+if "!REDIS_WIN_OK!"=="1" (
     set "CELERY_PID="
     del "%TEMP%\cfap_celery_pid.txt" >nul 2>&1
     powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object Name -match 'python' | Where-Object CommandLine -match 'backend\.app\.core\.celery_app' | Select-Object -ExpandProperty ProcessId" > "%TEMP%\cfap_celery_pid.txt" 2>nul
@@ -268,7 +248,7 @@ if "!REDIS_WIN_STATUS!"=="READY (Connected)" (
         echo [INFO] CFAP Celery worker is already running [PID !CELERY_PID!]. Skipping startup.
     ) else (
         echo [*] Launching CFAP Celery Worker in a dedicated window...
-        start "CFAP - Celery Worker" cmd.exe /k "cd /d \"%PROJECT_ROOT%\" && \"%PYTHON_EXE%\" -m celery -A backend.app.core.celery_app.celery_app worker --loglevel=info --pool=solo"
+        start "CFAP - Celery Worker" cmd.exe /k ""!PYTHON_EXE!" -m celery -A backend.app.core.celery_app.celery_app worker --loglevel=info --pool=solo"
         echo [*] Verifying Celery worker process...
         ping -n 4 127.0.0.1 >nul
         set "CELERY_PID="
@@ -288,13 +268,13 @@ if "!REDIS_WIN_STATUS!"=="READY (Connected)" (
         )
     )
 ) else (
-    set "CELERY_STATUS=SKIPPED (Redis Unreachable from Windows)"
-    echo [WARNING] Celery worker skipped because Windows cannot connect to Redis.
+    set "CELERY_STATUS=SKIPPED (Redis Unreachable)"
+    echo [WARNING] Celery worker skipped because Redis is unreachable on 127.0.0.1:6380.
 )
 echo.
 
 REM ============================================================================
-REM 8. FRONTEND (Next.js dev server on http://localhost:3000)
+REM 7. FRONTEND (Next.js dev server on http://localhost:3000)
 REM ============================================================================
 echo [*] Checking CFAP Frontend status [http://localhost:3000]...
 curl.exe -s -I --connect-timeout 2 http://localhost:3000 2>nul | findstr /i "HTTP/" >nul 2>&1
@@ -310,8 +290,14 @@ if not errorlevel 1 (
         echo [WARNING] Port 3000 is occupied by another process that is not CFAP Frontend.
         echo           Frontend startup skipped to avoid conflicts.
     ) else (
+        if not exist "%PROJECT_ROOT%\frontend\node_modules" (
+            echo [*] Frontend dependencies missing. Installing using npm ci...
+            cd /d "%PROJECT_ROOT%\frontend"
+            call npm ci
+            cd /d "%PROJECT_ROOT%"
+        )
         echo [*] Launching CFAP Frontend in a dedicated window...
-        start "CFAP - Frontend (Next.js)" cmd.exe /k "cd /d \"%PROJECT_ROOT%\frontend\" && npm run dev"
+        start "CFAP - Frontend (Next.js)" /D "%PROJECT_ROOT%\frontend" cmd.exe /k "npm run dev"
         echo [*] Waiting for Frontend to respond at http://localhost:3000 [timeout: 45 seconds]...
         set "FRONTEND_STATUS=FAILED (Startup timed out)"
         for /l %%i in (1,1,45) do (
@@ -334,7 +320,7 @@ if not errorlevel 1 (
 echo.
 
 REM ============================================================================
-REM 9. BROWSER LAUNCH
+REM 8. BROWSER LAUNCH
 REM ============================================================================
 if "!FRONTEND_CONFIRMED!"=="1" (
     echo [*] Opening application in default browser: http://localhost:3000
@@ -345,14 +331,13 @@ if "!FRONTEND_CONFIRMED!"=="1" (
 echo.
 
 REM ============================================================================
-REM 10. FINAL STARTUP SUMMARY
+REM 9. FINAL STARTUP SUMMARY
 REM ============================================================================
 echo ============================================================
 echo               CFAP STARTUP LAUNCHER SUMMARY
 echo ============================================================
-echo   PostgreSQL (postgresql-x64-17):  !POSTGRES_STATUS!
-echo   Redis (WSL Ubuntu):              !REDIS_WSL_STATUS!
-echo   Redis (Windows Connectivity):    !REDIS_WIN_STATUS!
+echo   PostgreSQL:                      !POSTGRES_STATUS!
+echo   Redis (WSL Ubuntu on 6380):      !REDIS_WIN_STATUS!
 echo   Backend (FastAPI :8000):         !BACKEND_STATUS!
 echo   Celery Worker:                   !CELERY_STATUS!
 echo   Frontend (Next.js :3000):        !FRONTEND_STATUS!
@@ -361,10 +346,8 @@ echo.
 
 REM Overall readiness evaluation
 set "OVERALL_SUCCESS=1"
-if "!POSTGRES_STATUS!"=="FAILED" set "OVERALL_SUCCESS=0"
-if "!REDIS_WSL_STATUS!"=="FAILED" set "OVERALL_SUCCESS=0"
-if "!REDIS_WIN_STATUS!"=="FAILED (Unreachable from Windows)" set "OVERALL_SUCCESS=0"
-if "!REDIS_WIN_STATUS!"=="SKIPPED (WSL Redis unavailable)" set "OVERALL_SUCCESS=0"
+if not "!POSTGRES_STATUS!"=="READY (Database Connected)" set "OVERALL_SUCCESS=0"
+if "!REDIS_WIN_OK!"=="0" set "OVERALL_SUCCESS=0"
 if "!BACKEND_STATUS!"=="FAILED (Health check timed out)" set "OVERALL_SUCCESS=0"
 if "!BACKEND_STATUS!"=="CONFLICT (Port 8000 in use by another process)" set "OVERALL_SUCCESS=0"
 if "!FRONTEND_STATUS!"=="FAILED (Startup timed out)" set "OVERALL_SUCCESS=0"
@@ -373,6 +356,8 @@ if "!FRONTEND_STATUS!"=="CONFLICT (Port 3000 in use by another process)" set "OV
 if "!OVERALL_SUCCESS!"=="1" (
     echo [SUCCESS] CFAP services are operational.
     echo           Access the web dashboard at: http://localhost:3000
+    echo           Backend API Health:          http://127.0.0.1:8000/health
+    echo           Database Health:             http://127.0.0.1:8000/health/db
     echo           API Documentation:           http://127.0.0.1:8000/docs
 ) else (
     echo [WARNING] CFAP startup finished with errors, conflicts, or skipped components.
@@ -383,11 +368,12 @@ echo.
 echo ============================================================
 echo               HOW TO SAFELY STOP CFAP SERVICES
 echo ============================================================
-echo   1. Frontend:      Close or press Ctrl+C in "CFAP - Frontend (Next.js)"
-echo   2. Celery Worker: Close or press Ctrl+C in "CFAP - Celery Worker"
-echo   3. Backend:       Close or press Ctrl+C in "CFAP - Backend (FastAPI)"
-echo   4. PostgreSQL:    Elevated CMD: net stop postgresql-x64-17
-echo   5. Redis (WSL):   Terminal: wsl -d Ubuntu -u root -- service redis-server stop
+echo   Quick stop: Run stop.bat from the project directory.
+echo   Manual stop:
+echo     1. Frontend:      Close or press Ctrl+C in "CFAP - Frontend (Next.js)"
+echo     2. Celery Worker: Close or press Ctrl+C in "CFAP - Celery Worker"
+echo     3. Backend:       Close or press Ctrl+C in "CFAP - Backend (FastAPI)"
+echo     4. Redis Keepalive: Close "CFAP - Redis (WSL)"
 echo ============================================================
 echo.
 pause

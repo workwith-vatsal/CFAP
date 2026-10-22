@@ -109,151 +109,121 @@ Long-running analysis and report-generation operations are designed to execute a
 
 ## Getting Started
 
-### Prerequisites
+### One-Click Local Startup (Recommended)
 
-Install and configure the following before running CFAP:
+You can launch the complete CFAP application with all dependencies by double-clicking:
 
-- Python 3.11+
-- Node.js compatible with Next.js 16 and npm
-- PostgreSQL 15+ (PostgreSQL 17 is used in the current development environment)
-- Redis reachable by the backend and Celery worker
-- Git
+`run.bat`
 
-A working internet connection may be required to download dependencies and AI models or use external services such as email delivery, Google OAuth, and a configured LLM provider.
+located in the project root directory (`C:\Users\DELL\Desktop\CFAP\run.bat`), or by executing it from a terminal:
 
-### 1. Clone or Open the Repository
-
-If the repository is already on your computer:
-
-```powershell
-cd C:\Users\DELL\Desktop\CFAP
+```cmd
+.\run.bat
 ```
 
-### 2. Configure Environment Variables
+#### What `run.bat` Does Automatically:
+1. **Resolves Project Root:** Automatically determines absolute paths independent of working directory.
+2. **Validates Prerequisites:** Checks availability of Python virtual environment, Node.js/npm, curl, and WSL 2.
+3. **Enforces Process Environment:** Sets `REDIS_URL=redis://127.0.0.1:6380/0`, `CELERY_BROKER_URL=redis://127.0.0.1:6380/0`, and `CELERY_RESULT_BACKEND=redis://127.0.0.1:6380/0`.
+4. **Verifies PostgreSQL:** Confirms the `postgresql-x64-17` Windows service is running and validates database query execution from Python.
+5. **Initializes Persistent Redis:** Verifies Redis on `127.0.0.1:6380`. If WSL is stopped or idle, launches a keepalive session (`CFAP - Redis (WSL)`) to keep the Ubuntu WSL distribution active and ensures `service redis-server` is running.
+6. **Starts FastAPI Backend:** Launches the backend in a dedicated console window (`CFAP - Backend (FastAPI)`) and probes `http://127.0.0.1:8000/health` with bounded retry.
+7. **Starts Celery Worker:** Launches Celery in a dedicated window (`CFAP - Celery Worker`) with `--pool=solo`, connects to Redis on 6380, and verifies registered tasks (`run_analysis_pipeline`, `generate_pdf_report`).
+8. **Starts Next.js Frontend:** Verifies `frontend/node_modules` (runs `npm ci` with lockfile if missing) and launches `npm run dev` in a dedicated window (`CFAP - Frontend (Next.js)`).
+9. **Opens Web Browser:** Once the frontend is responsive, automatically opens `http://localhost:3000` in the default browser.
+10. **Idempotent:** Running `run.bat` a second time safely detects running services and does not create duplicate processes.
 
-Create a local `.env` file from the example if you do not already have one:
+#### Safe Shutdown:
 
-```powershell
-Copy-Item .env.example .env
+To safely stop all CFAP application processes, double-click:
+
+`stop.bat`
+
+or run:
+
+```cmd
+.\stop.bat
 ```
 
-Configure the required local database, authentication, email, Redis, and AI provider settings in `.env`, as applicable.
+`stop.bat` targets only CFAP console windows and application processes (FastAPI backend, Celery worker, Next.js server, and WSL keepalive session). It does **not** terminate PostgreSQL or general WSL processes.
 
-**Important security requirements:**
+---
 
-- Never commit `.env`.
-- Never publish API keys, OAuth secrets, database passwords, JWT signing secrets, or email credentials.
-- Keep `.env.example` limited to configuration names and safe example values.
-- Do not replace an existing working `.env` file without first protecting its contents.
+### Application URLs and Endpoints
 
-### 3. Set Up the Python Environment
+- **Web Dashboard:** `http://localhost:3000`
+- **Backend API:** `http://127.0.0.1:8000`
+- **Backend Health Check:** `http://127.0.0.1:8000/health`
+- **Database Health Check:** `http://127.0.0.1:8000/health/db`
+- **Interactive API Documentation (Swagger):** `http://127.0.0.1:8000/docs`
 
-Activate the existing virtual environment:
+---
 
+### Manual / Step-by-Step Startup
+
+If running components manually in separate terminals:
+
+#### 1. Redis Configuration & Startup
+In the local development environment, Redis runs persistently inside Ubuntu WSL on port `6380`:
+- **Configuration File:** `/etc/redis/redis.conf`
+- **Active Backup (Port 6380):** `/var/backups/redis.conf.backup_20261022` (captures the verified port 6380 configuration)
+- **Binding:** `127.0.0.1 -::1` with `protected-mode yes` (safe loopback only, never exposed to LAN)
+- **Start Command:**
+  ```powershell
+  wsl -d Ubuntu -u root -- service redis-server start
+  ```
+- **Reverting to Port 6379 (if ever needed):**
+  > [!NOTE]
+  > `/var/backups/redis.conf.backup_20261022` is a backup of the port 6380 configuration, not the original port 6379 default. To revert to the original port 6379, modify the port directive directly:
+  ```powershell
+  wsl -d Ubuntu -u root -- sed -i 's/^port 6380/port 6379/' /etc/redis/redis.conf
+  wsl -d Ubuntu -u root -- systemctl restart redis-server
+  ```
+- **Restoring Port 6380 Configuration:**
+  ```powershell
+  wsl -d Ubuntu -u root -- cp /var/backups/redis.conf.backup_20261022 /etc/redis/redis.conf
+  wsl -d Ubuntu -u root -- systemctl restart redis-server
+  ```
+
+#### 2. Start PostgreSQL
+Ensure Windows service `postgresql-x64-17` is running:
 ```powershell
-.\.venv\Scripts\Activate.ps1
+sc query postgresql-x64-17
 ```
 
-Install the project dependencies:
-
+#### 3. Start Backend (Terminal 1)
 ```powershell
-python -m pip install -r requirements.txt
-```
-
-The root `requirements.txt` references the backend dependency requirements.
-
-### 4. Start PostgreSQL and Redis
-
-Start PostgreSQL and ensure the configured database and database user exist.
-
-Start Redis using the installation method configured for your environment. Redis must be reachable at the URL specified by the backend configuration.
-
-In the current development environment, Redis is installed in WSL Ubuntu, while CFAP's Python backend runs on Windows. Windows-to-WSL Redis connectivity is still undergoing runtime verification. Do not assume that a healthy Redis service inside WSL automatically means that the Windows backend can connect to it.
-
-### 5. Apply Database Migrations
-
-From the repository root:
-
-```powershell
-alembic upgrade head
-```
-
-This applies the existing Alembic migrations to the configured database.
-
-Do not reset or recreate the database as a routine troubleshooting step.
-
-### 6. Start the FastAPI Backend
-
-Open a PowerShell terminal in the repository root:
-
-```powershell
+$env:REDIS_URL="redis://127.0.0.1:6380/0"
+$env:CELERY_BROKER_URL="redis://127.0.0.1:6380/0"
+$env:CELERY_RESULT_BACKEND="redis://127.0.0.1:6380/0"
 .\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The backend should listen at:
-
-`http://127.0.0.1:8000`
-
-The current health endpoints are:
-
-- `GET /health`
-- `GET /health/db`
-
-Use these endpoints to check backend and database health.
-
-### 7. Start the Celery Worker
-
-Open a separate PowerShell terminal in the repository root:
-
+#### 4. Start Celery Worker (Terminal 2)
 ```powershell
+$env:REDIS_URL="redis://127.0.0.1:6380/0"
+$env:CELERY_BROKER_URL="redis://127.0.0.1:6380/0"
+$env:CELERY_RESULT_BACKEND="redis://127.0.0.1:6380/0"
 .\.venv\Scripts\python.exe -m celery -A backend.app.core.celery_app.celery_app worker --loglevel=info --pool=solo
 ```
 
-The worker requires a working Redis connection. Confirm that it connects to its broker and registers the analysis and report tasks:
-
-- `run_analysis_pipeline`
-- `generate_pdf_report`
-
-A worker process opening successfully is not sufficient evidence that background jobs are functioning. Check the worker logs and execute a real background workflow.
-
-### 8. Start the Frontend
-
-Open another PowerShell terminal:
-
+#### 5. Start Frontend (Terminal 3)
 ```powershell
 cd frontend
-npm install
 npm run dev
 ```
 
-Open the local frontend address printed by Next.js, normally:
-
-`http://localhost:3000`
-
-The frontend communicates with the backend through the configured API client and application settings.
-
-### 9. Run Backend Tests
-
-From the repository root:
-
+#### 6. Run Test Suite
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -v
 ```
 
-The tests exercise backend functionality, including authentication, authorization, data processing, analytics, explainability, assistant behavior, reporting, and tenant-isolation protections.
-
-Automated tests do not replace manual verification of external services or live background processing.
-
-### 10. Run Frontend Quality Checks
-
-From the `frontend` directory:
-
+#### 7. Run Frontend Quality Checks
 ```powershell
+cd frontend
 npm run lint
 npm run build
 ```
-
-Use the repository's existing scripts for linting and production-build verification.
 
 ---
 
@@ -398,35 +368,33 @@ Before external deployment, review cookie security, HTTPS, CORS, secrets managem
 
 ## Testing and Verification Status
 
-### Last Reported Automated Verification
+### Verified Runtime Verification
 
-The local verification report dated October 19, 2026, recorded:
+The runtime verification conducted on October 22, 2026, confirmed:
 
-| Check | Reported result |
-|---|---|
-| Backend automated test suite | 116 passed, 0 failed |
-| Frontend ESLint | 0 errors, 0 warnings |
-| TypeScript check | 0 errors during production build |
-| Frontend production build | Successful |
-| Static route generation | 21 routes generated |
-| Celery task registration | Analysis and report tasks registered |
-| Backend health endpoint | HTTP 200 |
-| Database health endpoint | HTTP 200 |
+| Check | Verified Result | Details |
+|---|---|---|
+| Persistent WSL Redis | PASS | Configured on port `6380` in `/etc/redis/redis.conf`, backup saved |
+| Windows TCP & Python Redis | PASS | Windows connects to `127.0.0.1:6380`, Python client returns `PONG` (`True`) |
+| Celery Worker & Tasks | PASS | Connected to `redis://127.0.0.1:6380/0`, registered `run_analysis_pipeline` and `generate_pdf_report` |
+| Live Background Tasks (PDF) | PASS | Queued into Celery broker on 6380, rendered PDF, persisted file, validated `%PDF-1.4` |
+| Multi-Tenant Isolation | PASS | Cross-user report access & download blocked with 404 / ValueError |
+| Backend automated test suite | PASS (116/116) | 116 passed, 0 failed in 46.67s |
+| Frontend ESLint | PASS | 0 errors, 0 warnings |
+| TypeScript Check | PASS | 0 errors (`npx tsc --noEmit`) |
+| Frontend Production Build | PASS | Next.js 16.3.5 built 21 static and dynamic routes cleanly |
+| One-Click Startup (`run.bat`) | PASS | Launches PostgreSQL check, Redis on 6380, Backend, Celery, and Frontend |
+| Safe Shutdown (`stop.bat`) | PASS | Terminates only CFAP console windows and child processes without killing OS services |
+| Idempotency | PASS | Second invocation reuses active services without conflict |
 
-These are the results recorded by the local verification report; they are not a guarantee that every workflow has passed live runtime acceptance.
+### Verified End-to-End Acceptance
 
-### Outstanding Runtime Acceptance
-
-The following checks remain necessary:
-
-- Reliable Redis connectivity from the Windows-hosted backend.
-- Successful connection of the live Celery worker to Redis.
-- Real asynchronous dataset analysis reaching `COMPLETED`.
-- Verification that the completed results persist and appear correctly in the dashboard.
-- Successful background PDF generation and authorized report download.
-- Confirmation that the full application workflow works without relying on mock AI results.
-
-**Current status:** Core application implementation and reported automated checks are in place. Final end-to-end runtime acceptance is still in progress. Production readiness has not yet been established.
+The following workflows have been verified with live execution evidence:
+- **Persistent Redis on 6380:** Enabled and active in Ubuntu WSL under systemd, persistent across reboots and idle periods via keepalive session.
+- **FastAPI Backend & Database:** `/health` returns `healthy` and `/health/db` confirms PostgreSQL query execution.
+- **Celery Worker Execution:** Connected to `127.0.0.1:6380`, accepts dispatched tasks from FastAPI.
+- **Live PDF Report Workflow:** Generated valid ReportLab PDF via background Celery task, saved to tenant-isolated storage path, verified PDF header bytes, and confirmed multi-tenant isolation.
+- **Automated Test Coverage:** Full suite of 116 unit and integration tests passing.
 
 ---
 

@@ -3,8 +3,8 @@ from backend.app.core.config import settings
 
 celery_app = Celery(
     "cfap",
-    broker=settings.redis_url,
-    backend=settings.redis_url,
+    broker=settings.celery_broker_url,
+    backend=settings.celery_result_backend,
     include=[
         "backend.app.tasks.analysis_tasks",
         "backend.app.tasks.report_tasks",
